@@ -148,10 +148,11 @@ if st.sidebar.button('Rodar Simulação & IA'):
     model.fit(X_train, y_train)
     df_test['Prob_Alta'] = model.predict_proba(X_test)[:, 1]
 
-    # Simulação de Trades com Taxas de Corretagem
+    # Simulação de Trades com o Ciclo Completo
     capital = capital_inicial
     posicao = False
     preco_entrada = 0.0
+    data_entrada = None
     dias_na_posicao = 0
     historico_trades = []
     capital_historico = []
@@ -165,14 +166,9 @@ if st.sidebar.button('Rodar Simulação & IA'):
         if prob >= limiar_confianca:
           posicao = True
           preco_entrada = preco_atual
+          data_entrada = data_atual
           dias_na_posicao = 0
-          # Desconta taxa de corretagem na ENTRADA (Compra)
           capital -= capital * taxa_corretagem_pct
-          historico_trades.append({
-              'Data_Entrada': data_atual,
-              'Tipo': 'COMPRA',
-              'Preco': preco_entrada,
-          })
       else:
         dias_na_posicao += 1
         variacao = (preco_atual - preco_entrada) / preco_entrada
@@ -183,32 +179,36 @@ if st.sidebar.button('Rodar Simulação & IA'):
         ):
           lucro_op = capital * variacao
           capital += lucro_op
-          # Desconta taxa de corretagem na SAÍDA (Venda)
           capital -= capital * taxa_corretagem_pct
           posicao = False
+
+          # Registra o trade completo (Entrada + Saída)
           historico_trades.append({
+              'Data_Entrada': data_entrada,
+              'Preco_Entrada': preco_entrada,
               'Data_Saida': data_atual,
-              'Tipo': 'VENDA',
-              'Preco': preco_atual,
+              'Preco_Saida': preco_atual,
               'Lucro_Pct': variacao * 100,
               'Lucro_Financeiro': lucro_op,
           })
+
       capital_historico.append(capital)
 
     df_test['Capital_Estrategia'] = capital_historico
 
     # Métricas e Estatísticas
-    vendas = [t for t in historico_trades if t['Tipo'] == 'VENDA']
-    total_trades = len(vendas)
-    vitorias = len([t for t in vendas if t['Lucro_Pct'] > 0])
+    total_trades = len(historico_trades)
+    vitorias = len([t for t in historico_trades if t['Lucro_Pct'] > 0])
     win_rate = (vitorias / total_trades * 100) if total_trades > 0 else 0
     lucro_liq = capital - capital_inicial
 
+    # Cálculo do Max Drawdown
     serie_cap = pd.Series(capital_historico)
     pico = serie_cap.cummax()
     drawdown = (serie_cap - pico) / pico
     max_drawdown = drawdown.min() * 100
 
+    # --- EXIBIÇÃO NO PAINEL ---
     col1, col2, col3, col4 = st.columns(4)
     col1.metric(
         'Capital Final',
@@ -220,6 +220,7 @@ if st.sidebar.button('Rodar Simulação & IA'):
     col3.metric('Total de Operações', total_trades)
     col4.metric('Max Drawdown (Pior Queda)', f'{max_drawdown:.2f}%')
 
+    # Gráfico Plotly
     fig = make_subplots(
         rows=2,
         cols=1,
@@ -242,12 +243,10 @@ if st.sidebar.button('Rodar Simulação & IA'):
         col=1,
     )
 
-    compras_x = [
-        t['Data_Entrada'] for t in historico_trades if t['Tipo'] == 'COMPRA'
-    ]
-    compras_y = [t['Preco'] for t in historico_trades if t['Tipo'] == 'COMPRA']
-    vendas_x = [t['Data_Saida'] for t in historico_trades if t['Tipo'] == 'VENDA']
-    vendas_y = [t['Preco'] for t in historico_trades if t['Tipo'] == 'VENDA']
+    compras_x = [t['Data_Entrada'] for t in historico_trades]
+    compras_y = [t['Preco_Entrada'] for t in historico_trades]
+    vendas_x = [t['Data_Saida'] for t in historico_trades]
+    vendas_y = [t['Preco_Saida'] for t in historico_trades]
 
     fig.add_trace(
         go.Scatter(
@@ -285,9 +284,12 @@ if st.sidebar.button('Rodar Simulação & IA'):
     fig.update_layout(height=700, template='plotly_dark', hovermode='x unified')
     st.plotly_chart(fig, use_container_width=True)
 
-    st.subheader('📋 Histórico Detalhado de Operações')
-    if vendas:
-      df_historico_trades = pd.DataFrame(vendas)
+    # Tabela Detalhada com o Ciclo Completo
+    st.subheader(
+        '📋 Histórico Detalhado de Operações (Data de Entrada até Saída)'
+    )
+    if historico_trades:
+      df_historico_trades = pd.DataFrame(historico_trades)
       st.dataframe(df_historico_trades, use_container_width=True)
     else:
-      st.info('Nenhuma operação de venda concluída no período.')
+      st.info('Nenhuma operação concluída no período.')
