@@ -6,8 +6,83 @@ import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 import yfinance as yf
+from flask_login import (
+    FlaskLoginManager,
+    UserMixin,
+    current_user,
+    login_required,
+    login_user,
+    logout_user,
+)
+from flask_sqlalchemy import SQLAlchemy
+from werkzeug.security import check_password_hash, generate_password_hash
 
 app = Flask(__name__)
+# Configuração do Banco (PostgreSQL do Supabase ou SQLite local)
+app.config['SECRET_KEY'] = (
+    'chave-secreta-vespa-trade-2026'  # Pode manter ou alterar
+)
+app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
+    'DATABASE_URL', 'sqlite:///dados_robo.db'
+)
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
+
+db = SQLAlchemy(app)
+login_manager = FlaskLoginManager()
+login_manager.init_app(app)
+login_manager.login_view = 'login'
+
+
+# Modelos de Usuário e Ativos
+class User(UserMixin, db.Model):
+  __tablename__ = 'usuarios'
+  id = db.Column(db.Integer, primary_key=True)
+  username = db.Column(db.String(150), unique=True, nullable=False)
+  password = db.Column(db.String(200), nullable=False)
+  is_approved = db.Column(db.Boolean, default=False)
+
+
+class AtivoFavorito(db.Model):
+  __tablename__ = 'ativos_favoritos'
+  id = db.Column(db.Integer, primary_key=True)
+  ticker = db.Column(db.String(50), unique=True, nullable=False)
+
+
+@login_manager.user_loader
+def load_user(user_id):
+  return User.query.get(int(user_id))
+
+
+# Bloco de criação automática das tabelas e do admin padrão (colocar antes do if __name__ == '__main__')
+with app.app_context():
+  db.create_all()
+  if not User.query.filter_by(username='admin').first():
+    hashed_pw = generate_password_hash('admin123', method='pbkdf2:sha256')
+    admin_user = User(
+        username='admin', password=hashed_pw, is_approved=True
+    )
+    db.session.add(admin_user)
+    db.session.commit()
+
+  if AtivoFavorito.query.count() == 0:
+    padroes = [
+        'PETR4.SA',
+        'VALE3.SA',
+        'ITUB4.SA',
+        'BBDC4.SA',
+        'ABEV3.SA',
+        'WEGE3.SA',
+        'SPY',
+        'QQQ',
+        'BTC-USD',
+        'ETH-USD',
+    ]
+    for t in padroes:
+      db.session.add(AtivoFavorito(ticker=t))
+    try:
+      db.session.commit()
+    except:
+      db.session.rollback()
 
 
 def init_db():
@@ -25,6 +100,29 @@ def init_db():
             valor REAL
         )
     """)
+
+  # Insere ativos padrão de fábrica se a tabela estiver vazia
+  ativos_padrao = [
+      "PETR4.SA",
+      "VALE3.SA",
+      "ITUB4.SA",
+      "BBDC4.SA",
+      "ABEV3.SA",
+      "WEGE3.SA",
+      "SPY",
+      "QQQ",
+      "BTC-USD",
+      "ETH-USD",
+  ]
+  for ticker in ativos_padrao:
+    try:
+      cursor.execute(
+          "INSERT OR IGNORE INTO ativos_favoritos (ticker) VALUES (?)",
+          (ticker,),
+      )
+    except Exception:
+      pass
+
   conn.commit()
   conn.close()
 
@@ -365,10 +463,13 @@ def executar_analise(
     return None
 
 
-@app.route("/")
+@app.route('/')
+@login_required
 def index():
-  return render_template("index.html")
+  if not current_user.is_approved:
+    return redirect(url_for('logout'))
 
+  return render_template('index.html')
 
 @app.route("/api/ativos", methods=["GET", "POST"])
 def gerenciar_ativos():
@@ -432,6 +533,31 @@ def analisar():
     return jsonify({"erro": "Falha ao processar dados para este ativo."}), 400
   return jsonify(resultado)
 
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+  if request.method == 'POST':
+    username = request.form.get('username')
+    password = request.form.get('password')
+
+    user = User.query.filter_by(username=username).first()
+    if user and check_password_hash(user.password, password):
+      if not user.is_approved:
+        flash('Sua conta aguarda aprovação do administrador.', 'warning')
+        return render_template('login.html')
+
+      login_user(user)
+      return redirect(url_for('index'))
+    else:
+      flash('Usuário ou senha inválidos.', 'danger')
+
+  return render_template('login.html')
+
+
+@app.route('/logout')
+@login_required
+def logout():
+  logout_user()
+  return redirect(url_for('login'))
 
 if __name__ == "__main__":
   import os
