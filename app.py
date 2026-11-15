@@ -10,7 +10,6 @@ import yfinance as yf
 app = Flask(__name__)
 
 
-# --- BANCO DE DADOS LOCAL (SQLite) ---
 def init_db():
   conn = sqlite3.connect("dados_robo.db")
   cursor = conn.cursor()
@@ -44,15 +43,6 @@ def salvar_config_db(chave, valor):
   conn.close()
 
 
-def carregar_config_db(chave, valor_padrao):
-  conn = sqlite3.connect("dados_robo.db")
-  cursor = conn.cursor()
-  cursor.execute("SELECT valor FROM configuracoes WHERE chave = ?", (chave,))
-  row = cursor.fetchone()
-  conn.close()
-  return row[0] if row else valor_padrao
-
-
 def calcular_rsi(serie, janela=14):
   delta = serie.diff()
   ganho = delta.where(delta > 0, 0).rolling(window=janela).mean()
@@ -61,7 +51,126 @@ def calcular_rsi(serie, janela=14):
   return 100 - (100 / (1 + rs))
 
 
-# --- MOTOR DE BACKTEST E PREDIÇÃO ---
+def encontrar_melhor_configuracao_historica(
+    df_test,
+    confianca,
+    horizonte,
+    capital_ini,
+    risco_pct,
+    max_alocacao,
+    taxa_corretagem,
+):
+  sl_options = [0.01, 0.015, 0.02, 0.025]
+  tp_options = [0.02, 0.03, 0.04, 0.05]
+
+  best_wr = -1
+  best_sl_val = 1.5
+  best_tp_val = 3.0
+
+  for sl_val in sl_options:
+    for tp_val in tp_options:
+      capital = capital_ini
+      posicao = False
+      p_ent = 0.0
+      dias_p = 0
+      p_stop = 0.0
+      p_gain = 0.0
+      trades = 0
+      vitorias = 0
+
+      for i in range(len(df_test)):
+        h_at = df_test["High"].iloc[i]
+        l_at = df_test["Low"].iloc[i]
+        c_at = df_test["Close"].iloc[i]
+        prob = df_test["Prob_Alta"].iloc[i]
+
+        if not posicao:
+          if prob >= confianca:
+            posicao = True
+            p_ent = c_at
+            dias_p = 0
+            p_stop = p_ent * (1 - sl_val)
+            p_gain = p_ent * (1 + tp_val)
+            tamanho_posicao = min(
+                capital,
+                (capital * risco_pct) / sl_val,
+                capital * max_alocacao,
+            )
+            capital -= tamanho_posicao * taxa_corretagem
+        else:
+          dias_p += 1
+          b_stop = l_at <= p_stop
+          b_gain = h_at >= p_gain
+
+          if b_stop and b_gain:
+            var = -sl_val
+            posicao = False
+          elif b_stop:
+            var = -sl_val
+            posicao = False
+          elif b_gain:
+            var = tp_val
+            posicao = False
+          elif dias_p >= horizonte:
+            var = (c_at - p_ent) / p_ent
+            posicao = False
+
+          if not posicao:
+            trades += 1
+            if var > 0:
+              vitorias += 1
+
+      wr = (vitorias / trades * 100) if trades >= 2 else 0
+      if wr > best_wr and trades >= 2:
+        best_wr = wr
+        best_sl_val = sl_val * 100
+        best_tp_val = tp_val * 100
+
+  return best_wr, best_sl_val, best_tp_val
+
+
+def gerar_comentario_ia(
+    prob, limiar, win_rate, total_trades, best_wr, best_sl, best_tp
+):
+  pct = prob * 100
+  if pct < 40:
+    base_txt = (
+        "🔴 **Risco Alto:** Baixa probabilidade estatística atual."
+        " Recomenda-se cautela."
+    )
+  elif 40 <= pct < (limiar * 100):
+    base_txt = (
+        "🟡 **Zona Neutra:** Abaixo da régua de confiança exigida para"
+        " entrada."
+    )
+  elif (limiar * 100) <= pct < 75:
+    base_txt = (
+        "🟢 **Boas Probabilidades:** Padrões técnicos favoráveis detectados."
+    )
+  else:
+    base_txt = (
+        "⭐ **Alta Convicção:** Alinhamento robusto de indicadores para alta."
+    )
+
+  if total_trades >= 3:
+    hist_txt = (
+        f" O histórico atual registra uma taxa de acerto de {win_rate:.1f}%"
+        f" ({total_trades} operações)."
+    )
+  else:
+    hist_txt = " Poucos trades históricos registrados para este ativo."
+
+  sugestao_otimizacao = (
+      f"<br><br>💡 <strong>Sugestão baseada no histórico:</strong> O melhor Win"
+      f" Rate ({best_wr:.1f}%) para este ativo foi alcançado utilizando um"
+      f" <strong>Stop Loss de {best_sl:.1f}%</strong> e um <strong>Take Profit"
+      f" de {best_tp:.1f}%</strong>. Esta é uma sugestão gerada de acordo com o"
+      f" comportamento histórico do ativo."
+  )
+
+  return base_txt + hist_txt + sugestao_otimizacao
+
+
 def executar_analise(
     ticker,
     capital_ini,
@@ -127,7 +236,17 @@ def executar_analise(
 
     df_test["Prob_Alta"] = model.predict_proba(X_test)[:, 1]
 
-    # Predição atual
+    lim_val = confianca if confianca <= 1 else confianca / 100
+    best_wr, best_sl, best_tp = encontrar_melhor_configuracao_historica(
+        df_test,
+        lim_val,
+        horizonte,
+        capital_ini,
+        risco_pct,
+        max_alocacao,
+        taxa_corretagem,
+    )
+
     X_ultimo = data_features[features].iloc[[-1]]
     prob_atual = model.predict_proba(X_ultimo)[0][1]
     data_atual_mercado = str(data_features.index[-1])[:10]
@@ -152,19 +271,18 @@ def executar_analise(
       prob = df_test["Prob_Alta"].iloc[i]
 
       if not posicao:
-        if prob >= confianca:
+        if prob >= lim_val:
           posicao = True
           preco_entrada = close_atual
           data_entrada = data_atual
           dias_na_posicao = 0
-
           preco_stop_atual = preco_entrada * (1 - sl)
           preco_gain_atual = preco_entrada * (1 + tp)
 
-          risco_financeiro_desejado = capital * risco_pct
-          tamanho_por_risco = risco_financeiro_desejado / sl
-          tamanho_maximo_permitido = capital * max_alocacao
-          tamanho_posicao = min(capital, tamanho_por_risco, tamanho_maximo_permitido)
+          risco_fin = capital * risco_pct
+          tam_por_risco = risco_fin / sl
+          tam_max = capital * max_alocacao
+          tamanho_posicao = min(capital, tam_por_risco, tam_max)
 
           capital -= tamanho_posicao * taxa_corretagem
           capital_alocado = tamanho_posicao
@@ -194,7 +312,6 @@ def executar_analise(
           lucro_op = capital_alocado * variacao
           capital += lucro_op
           capital -= capital_alocado * taxa_corretagem
-
           historico_trades.append({
               "Data_Entrada": data_entrada,
               "Preco_Entrada": round(float(preco_entrada), 2),
@@ -217,6 +334,13 @@ def executar_analise(
     drawdown = (serie_cap - pico) / pico
     max_drawdown = float(drawdown.min() * 100) if not drawdown.empty else 0.0
 
+    comentario = gerar_comentario_ia(
+        prob_atual, lim_val, win_rate, total_trades, best_wr, best_sl, best_tp
+    )
+
+    datas_str = [str(idx)[:10] for idx in df_test.index]
+    precos_float = [float(p) for p in df_test["Close"].values]
+
     return {
         "ticker": ticker,
         "capital_final": round(capital, 2),
@@ -225,11 +349,15 @@ def executar_analise(
         "total_trades": total_trades,
         "max_drawdown": round(max_drawdown, 2),
         "historico_trades": historico_trades,
+        "comentario_ia": comentario,
+        "datas": datas_str,
+        "capital_historico": capital_historico,
+        "precos": precos_float,
         "sinal_atual": {
             "data": data_atual_mercado,
             "preco": preco_atual_mercado,
             "probabilidade": round(prob_atual * 100, 1),
-            "ativo_recomendado": bool(prob_atual >= confianca),
+            "ativo_recomendado": bool(prob_atual >= lim_val),
         },
     }
   except Exception as e:
@@ -237,7 +365,6 @@ def executar_analise(
     return None
 
 
-# --- ROTAS DO FLASK ---
 @app.route("/")
 def index():
   return render_template("index.html")
@@ -263,7 +390,7 @@ def gerenciar_ativos():
   ativos = [row[0] for row in cursor.fetchall()]
   conn.close()
   if not ativos:
-    ativos = ["SPY"]
+    ativos = ["SPY", "BTC-USD", "PETR4.SA"]
   return jsonify(ativos)
 
 
@@ -271,17 +398,25 @@ def gerenciar_ativos():
 def analisar():
   params = request.json
   ticker = params.get("ticker", "SPY")
-  capital = float(params.get("capital", 1000.0))
+  capital = float(params.get("capital", 10000.0))
   risco_pct = float(params.get("risco", 1.0)) / 100
   max_aloc = float(params.get("max_alocacao", 20.0)) / 100
-  confianca = float(params.get("confianca", 62.0)) / 100
+  confianca = float(params.get("confianca", 62.0))
   sl = float(params.get("stop_loss", 1.5)) / 100
   tp = float(params.get("take_profit", 3.0)) / 100
   taxa = float(params.get("taxa", 0.05)) / 100
   timeframe = params.get("timeframe", "Diário (1D)")
 
-  yf_interval = "1d" if "Diário" in timeframe else "1wk"
+  # --- SALVA AUTOMATICAMENTE NO BANCO PARA O BOT DO TELEGRAM ---
+  salvar_config_db("capital_inicial", capital)
+  salvar_config_db("risco_por_trade", float(params.get("risco", 1.0)))
+  salvar_config_db("max_alocacao", float(params.get("max_alocacao", 20.0)))
+  salvar_config_db("confianca", confianca)
+  salvar_config_db("stop_loss", float(params.get("stop_loss", 1.5)))
+  salvar_config_db("take_pers", float(params.get("take_profit", 3.0)))
+  salvar_config_db("take_profit", float(params.get("take_profit", 3.0)))
 
+  yf_interval = "1d" if "Diário" in timeframe else "1wk"
   resultado = executar_analise(
       ticker,
       capital,
@@ -295,10 +430,11 @@ def analisar():
   )
   if not resultado:
     return jsonify({"erro": "Falha ao processar dados para este ativo."}), 400
-
   return jsonify(resultado)
 
 
 if __name__ == "__main__":
-  print("🐝 Servidor Vespa Trade rodando em http://127.0.0.1:5000")
-  app.run(debug=True, port=5000)
+  import os
+
+  port = int(os.environ.get("PORT", 5000))
+  app.run(host="0.0.0.0", port=port)
