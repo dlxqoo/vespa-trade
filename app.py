@@ -575,13 +575,14 @@ if __name__ == "__main__":
   port = int(os.environ.get("PORT", 5000))
   app.run(host="0.0.0.0", port=port)
 
-  def rodar_telegram_em_background():
+# 1. Primeiro a função é declarada
+def rodar_telegram_em_background():
     # Cria um loop assíncrono para o Telegram rodar isolado em uma thread
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     loop.run_until_complete(iniciar_bot_telegram())
 
-# Inicia o bot automaticamente quando a aplicação sobe
+# 2. Depois o 'if' chama a função que já existe acima
 if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or "gunicorn" in os.environ.get("SERVER_SOFTWARE", ""):
     t = threading.Thread(target=rodar_telegram_em_background, daemon=True)
     t.start()
