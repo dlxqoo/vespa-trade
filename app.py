@@ -22,15 +22,16 @@ import yfinance as yf
 app = Flask(__name__)
 app.config['SECRET_KEY'] = 'chave-secreta-vespa-trade-2026'
 
-# Configuração limpa do banco de dados
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
-    'DATABASE_URL', 'sqlite:///dados_robo.db'
-)
+# Pega a URL do Render e corrige o prefixo se necessário
+db_url = os.environ.get('DATABASE_URL', 'sqlite:///dados_robo.db')
+if db_url and db_url.startswith('postgres://'):
+  db_url = db_url.replace('postgres://', 'postgresql://', 1)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
 
-# --- ADICIONE ESTAS LINHAS AQUI ---
 login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
