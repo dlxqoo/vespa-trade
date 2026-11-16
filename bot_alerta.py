@@ -1,38 +1,119 @@
+import asyncio
+import json
 import os
-import sqlite3
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier
 import requests
+from telegram import Update
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes
 import yfinance as yf
 
-# --- SUAS NOVAS CREDENCIAIS DO TELEGRAM (VESPA TRADE) ---
+# --- CONFIGURAÇÃO DO BOT DO TELEGRAM ---
 TELEGRAM_TOKEN = "9010278583:AAGBfLSgDQP7jVb9JwnvukfSG79jDpEzny0"
-CHAT_ID = "5939626001"
+CONFIG_FILE = "config_telegram.json"
 
 
-def enviar_alerta_telegram(mensagem):
+# --- GERENCIAMENTO DE PREFERÊNCIAS (JSON) ---
+def carregar_config():
+  if os.path.exists(CONFIG_FILE):
+    with open(CONFIG_FILE, "r") as f:
+      return json.load(f)
+  return {}
+
+
+def salvar_config(data):
+  with open(CONFIG_FILE, "w") as f:
+    json.dump(data, f, indent=4)
+
+
+# --- COMANDOS DO TELEGRAM ---
+async def set_ativos(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  chat_id = str(update.effective_chat.id)
+  args = context.args  # Ex: /ativos PETR4.SA VALE3.SA BTC-USD
+
+  if not args:
+    await update.message.reply_text(
+        "⚠️ Use o formato correto:\n`/ativos PETR4.SA VALE3.SA`",
+        parse_mode="Markdown",
+    )
+    return
+
+  config = carregar_config()
+  if chat_id not in config:
+    config[chat_id] = {"ativos": [], "confianca_minima": 62.0}
+
+  config[chat_id]["ativos"] = [ativo.upper() for ativo in args]
+  salvar_config(config)
+
+  await update.message.reply_text(
+      f"✅ Ativos monitorados atualizados:\n"
+      f"_{', '.join(config[chat_id]['ativos'])}_",
+      parse_mode="Markdown",
+  )
+
+
+async def set_confianca(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  chat_id = str(update.effective_chat.id)
+  args = context.args
+
+  if not args or not args[0].replace(".", "", 1).isdigit():
+    await update.message.reply_text(
+        "⚠️ Use o formato correto:\n`/confianca 70` (para 70% mínimo)",
+        parse_mode="Markdown",
+    )
+    return
+
+  valor = float(args[0])
+  config = carregar_config()
+  if chat_id not in config:
+    config[chat_id] = {
+        "ativos": ["PETR4.SA", "VALE3.SA"],
+        "confianca_minima": 62.0,
+    }
+
+  config[chat_id]["confianca_minima"] = valor
+  salvar_config(config)
+
+  await update.message.reply_text(
+      f"✅ Confiança mínima ajustada para: *{valor}%*", parse_mode="Markdown"
+  )
+
+
+async def status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  chat_id = str(update.effective_chat.id)
+  config = carregar_config()
+
+  if chat_id not in config or not config[chat_id]["ativos"]:
+    await update.message.reply_text(
+        "⚙️ Você ainda não configurou ativos.\nUse `/ativos PETR4.SA` e"
+        " `/confianca 65`",
+        parse_mode="Markdown",
+    )
+    return
+
+  user_conf = config[chat_id]
+  ativos_str = ", ".join(user_conf["ativos"])
+  await update.message.reply_text(
+      f"📊 *Suas Configurações Atuais:*\n\n"
+      f"• *Ativos:* `{ativos_str}`\n"
+      f"• *Confiança Mínima:* `{user_conf['confianca_minima']}%`",
+      parse_mode="Markdown",
+  )
+
+
+# --- FUNÇÕES DE ANÁLISE QUANTITATIVA ---
+def enviar_alerta_telegram(chat_id, mensagem):
   url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-  payload = {"chat_id": CHAT_ID, "text": mensagem, "parse_mode": "Markdown"}
+  payload = {"chat_id": chat_id, "text": mensagem, "parse_mode": "Markdown"}
   try:
     response = requests.post(url, json=payload)
     if response.status_code != 200:
-      print(f"Erro ao enviar Telegram: {response.text}")
+      print(f"Erro ao enviar Telegram para {chat_id}: {response.text}")
     else:
-      print("🐝 Alerta enviado com sucesso para o Telegram!")
+      print(f"🐝 Alerta enviado com sucesso para o chat {chat_id}!")
   except Exception as e:
     print(f"Erro de conexão com Telegram: {e}")
-
-
-def carregar_config_db(chave, valor_padrao):
-  if not os.path.exists("dados_robo.db"):
-    return valor_padrao
-  conn = sqlite3.connect("dados_robo.db")
-  cursor = conn.cursor()
-  cursor.execute("SELECT valor FROM configuracoes WHERE chave = ?", (chave,))
-  row = cursor.fetchone()
-  conn.close()
-  return row[0] if row else valor_padrao
 
 
 def calcular_rsi(serie, janela=14):
@@ -43,43 +124,29 @@ def calcular_rsi(serie, janela=14):
   return 100 - (100 / (1 + rs))
 
 
-def varredura_vespa_trade():
-  print("🐝 [Vespa Trade] Iniciando varredura automatizada de mercado...")
-
-  if not os.path.exists("dados_robo.db"):
-    print("Banco de dados 'dados_robo.db' não encontrado.")
-    return
-
-  # Carrega os parâmetros sincronizados diretamente do painel web
-  capital_inicial = carregar_config_db("capital_inicial", 10000.0)
-  risco_por_trade_pct = carregar_config_db("risco_por_trade", 1.0) / 100
-  max_alocacao_pct = carregar_config_db("max_alocacao", 20.0) / 100
-  limiar_confianca = carregar_config_db("confianca", 62.0) / 100
-  stop_loss = carregar_config_db("stop_loss", 1.5) / 100
-  take_profit = carregar_config_db("take_profit", 3.0) / 100
+def executar_varredura_usuario(chat_id, user_prefs):
+  lista_ativos = user_prefs.get("ativos", [])
+  limiar_confianca = user_prefs.get("confianca_minima", 62.0) / 100
+  stop_loss = 0.015  # 1.5%
+  take_profit = 0.03  # 3.0%
+  capital_inicial = 10000.0
+  risco_por_trade_pct = 0.01
+  max_alocacao_pct = 0.20
   horizonte = 5
 
-  print(
-      f"⚙️ Configurações aplicadas -> Confiança Mínima:"
-      f" {limiar_confianca*100:.1f}% | Stop Loss: {stop_loss*100}% | Take"
-      f" Profit: {take_profit*100}%"
-  )
-
-  conn = sqlite3.connect("dados_robo.db")
-  df_ativos = pd.read_sql("SELECT ticker FROM ativos_favoritos", conn)
-  conn.close()
-
-  lista_ativos = df_ativos["ticker"].tolist()
   if not lista_ativos:
-    print("Nenhum ativo cadastrado no banco de dados.")
     return
+
+  print(
+      f"🐝 [Vespa Trade] Analisando para o chat {chat_id} | Confiança Mínima:"
+      f" {limiar_confianca*100:.1f}%"
+  )
 
   sinais_encontrados = []
   resumo_status = []
 
   for ticker in lista_ativos:
     try:
-      print(f"Analisando {ticker}...")
       data = yf.download(ticker, period="7y", interval="1d", progress=False)
       if data.empty or len(data) < 100:
         continue
@@ -128,14 +195,9 @@ def varredura_vespa_trade():
       df_test = data.iloc[split_idx:].copy()
       df_test["Prob_Alta"] = model.predict_proba(X_test)[:, 1]
 
-      # Cálculo do Win Rate Histórico Recente
-      trades_hist = 0
-      vitorias_hist = 0
-      posicao = False
-      p_ent = 0.0
-      dias_p = 0
-      p_stop = 0.0
-      p_gain = 0.0
+      # Cálculo do Win Rate Histórico
+      trades_hist, vitorias_hist, posicao = 0, 0, False
+      p_ent, dias_p, p_stop, p_gain = 0.0, 0, 0.0, 0.0
 
       for i in range(len(df_test)):
         h_at = df_test["High"].iloc[i]
@@ -154,7 +216,6 @@ def varredura_vespa_trade():
           dias_p += 1
           b_stop = l_at <= p_stop
           b_gain = h_at >= p_gain
-
           if b_stop or b_gain or dias_p >= horizonte:
             trades_hist += 1
             if b_gain and not b_stop:
@@ -177,16 +238,9 @@ def varredura_vespa_trade():
           + (" (🚀 Compra!)" if prob_atual >= limiar_confianca else "")
       )
 
-      if trades_hist > 0:
-        score_operacional = (prob_pct * 0.4) + (min(win_rate_hist, 100) * 0.6)
-      else:
-        score_operacional = prob_pct * 0.8
-
-      # Verifica se gera sinal de compra
       if prob_atual >= limiar_confianca:
         valor_stop = preco_atual * (1 - stop_loss)
         valor_gain = preco_atual * (1 + take_profit)
-
         risco_fin = capital_inicial * risco_por_trade_pct
         tam_por_risco = risco_fin / stop_loss
         tam_max = capital_inicial * max_alocacao_pct
@@ -200,39 +254,66 @@ def varredura_vespa_trade():
             f"🎯 *Confiança IA:* `{prob_pct:.1f}%` (Mínimo:"
             f" {limiar_confianca*100:.0f}%)\n"
             f"📊 *Win Rate Histórico:* `{win_rate_hist:.1f}%` ({trades_hist}"
-            f" trades)\n"
-            f"⭐ *Score Operacional:* `{score_operacional:.1f}%`\n\n"
+            f" trades)\n\n"
             f"⚙️ *Ficha OCO para Corretora:*\n"
             f"• **Capital Alocado:** `R$ / $ {valor_alocado:,.2f}`\n"
-            f"• **Stop Loss (-{stop_loss*100}%):** `{valor_stop:,.2f}`\n"
-            f"• **Take Profit (+{take_profit*100}%):** `{valor_gain:,.2f}`\n"
+            f"• **Stop Loss (-1.5%):** `{valor_stop:,.2f}`\n"
+            f"• **Take Profit (+3.0%):** `{valor_gain:,.2f}`\n"
         )
         sinais_encontrados.append(msg)
 
     except Exception as e:
-        print(f"Erro ao processar {ticker}: {e}")
+        print(f"Erro ao processar {ticker} para o chat {chat_id}: {e}")
 
-  # Consolidar relatório para o Telegram
+  # Consolidar relatório para o usuário
   resumo_texto = "\n".join(resumo_status) if resumo_status else "Nenhum ativo."
 
   if sinais_encontrados:
     mensagem_final = (
         f"🐝 *RELATÓRIO VESPA TRADE - OPORTUNIDADES*\n"
-        f"⚙️ *Régua de Confiança:* `{limiar_confianca*100:.1f}%`\n\n"
-        f"📊 *Status Geral dos Ativos:*\n{resumo_texto}\n\n"
+        f"⚙️ *Sua Régua de Confiança:* `{limiar_confianca*100:.1f}%`\n\n"
+        f"📊 *Status dos seus ativos:*\n{resumo_texto}\n\n"
         f"-------------------\n"
         + "\n-------------------\n".join(sinais_encontrados)
     )
   else:
     mensagem_final = (
         f"🐝 *RELATÓRIO DIÁRIO - VESPA TRADE*\n"
-        f"⚙️ *Régua de Confiança:* `{limiar_confianca*100:.1f}%`\n\n"
-        f"📊 *Status Geral dos Ativos:*\n{resumo_texto}\n\n"
-        f"⏳ *Nenhum ativo atingiu o limiar mínimo hoje. Protegendo o capital.*"
+        f"⚙️ *Sua Régua de Confiança:* `{limiar_confianca*100:.1f}%`\n\n"
+        f"📊 *Status dos seus ativos:*\n{resumo_texto}\n\n"
+        f"⏳ *Nenhum ativo atingiu o seu limiar hoje.*"
     )
 
-  enviar_alerta_telegram(mensagem_final)
+  enviar_alerta_telegram(chat_id, mensagem_final)
+
+
+def disparar_varreduras_gerais():
+  config = carregar_config()
+  if not config:
+    print("Nenhum usuário configurado no bot ainda.")
+    return
+
+  for chat_id, prefs in config.items():
+    executar_varredura_usuario(chat_id, prefs)
+
+
+# --- INICIALIZAÇÃO DO BOT ---
+async def main():
+  app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
+
+  app.add_handler(CommandHandler("ativos", set_ativos))
+  app.add_handler(CommandHandler("confianca", set_confianca))
+  app.add_handler(CommandHandler("status", status_comando))
+
+  print("🤖 Bot do Telegram rodando e escutando comandos...")
+  await app.initialize()
+  await app.start()
+  await app.updater.start_polling()
+
+  # Mantém o bot rodando em background e executa varreduras periódicas se quiser
+  while True:
+    await asyncio.sleep(3600)  # Mantém o loop ativo
 
 
 if __name__ == "__main__":
-  varredura_vespa_trade()
+  asyncio.run(main())

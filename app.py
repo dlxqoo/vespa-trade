@@ -1,6 +1,9 @@
 from datetime import datetime
 import os
 import sqlite3
+import asyncio
+import threading
+from bot_alerta import main as iniciar_bot_telegram
 
 # Adicionado 'flash', 'redirect' e 'url_for' aqui embaixo:
 from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
@@ -571,3 +574,15 @@ if __name__ == "__main__":
 
   port = int(os.environ.get("PORT", 5000))
   app.run(host="0.0.0.0", port=port)
+
+  def rodar_telegram_em_background():
+    # Cria um loop assíncrono para o Telegram rodar isolado em uma thread
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(iniciar_bot_telegram())
+
+# Inicia o bot automaticamente quando a aplicação sobe
+if os.environ.get("WERKZEUG_RUN_MAIN") == "true" or "gunicorn" in os.environ.get("SERVER_SOFTWARE", ""):
+    t = threading.Thread(target=rodar_telegram_em_background, daemon=True)
+    t.start()
+    print("🧵 Thread do Bot do Telegram iniciada com sucesso!")
