@@ -28,6 +28,19 @@ def salvar_config(data):
 
 
 # --- COMANDOS DO TELEGRAM ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  await update.message.reply_text(
+      "🐝 *Olá! Bem-vindo ao Vespa Trade Bot.*\n\n"
+      "Estou pronto para monitorar o mercado para você.\n\n"
+      "⚙️ *Comandos disponíveis:*\n"
+      "• `/ativos PETR4.SA VALE3.SA` — Define quais ativos quer monitorar\n"
+      "• `/confianca 65` — Define a % mínima de confiança da IA\n"
+      "• `/status` — Mostra suas configurações atuais\n"
+      "• `/resetar` — Limpa suas configurações e ativos",
+      parse_mode="Markdown",
+  )
+
+
 async def set_ativos(update: Update, context: ContextTypes.DEFAULT_TYPE):
   chat_id = str(update.effective_chat.id)
   args = context.args  # Ex: /ativos PETR4.SA VALE3.SA BTC-USD
@@ -100,6 +113,25 @@ async def status_comando(update: Update, context: ContextTypes.DEFAULT_TYPE):
       f"• *Confiança Mínima:* `{user_conf['confianca_minima']}%`",
       parse_mode="Markdown",
   )
+
+
+async def resetar_config(update: Update, context: ContextTypes.DEFAULT_TYPE):
+  chat_id = str(update.effective_chat.id)
+  config = carregar_config()
+
+  if chat_id in config:
+    del config[chat_id]
+    salvar_config(config)
+    await update.message.reply_text(
+        "🗑️ *Configurações resetadas com sucesso!*\n\nSeus ativos e"
+        " preferências foram apagados.\nUse `/start` ou `/ativos` para"
+        " configurar novamente.",
+        parse_mode="Markdown",
+    )
+  else:
+    await update.message.reply_text(
+        "⚠️ Você não possui nenhuma configuração ativa no momento."
+    )
 
 
 # --- FUNÇÕES DE ANÁLISE QUANTITATIVA ---
@@ -263,7 +295,7 @@ def executar_varredura_usuario(chat_id, user_prefs):
         sinais_encontrados.append(msg)
 
     except Exception as e:
-        print(f"Erro ao processar {ticker} para o chat {chat_id}: {e}")
+      print(f"Erro ao processar {ticker} para o chat {chat_id}: {e}")
 
   # Consolidar relatório para o usuário
   resumo_texto = "\n".join(resumo_status) if resumo_status else "Nenhum ativo."
@@ -301,18 +333,30 @@ def disparar_varreduras_gerais():
 async def main():
   app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
+  app.add_handler(CommandHandler("start", start))
   app.add_handler(CommandHandler("ativos", set_ativos))
   app.add_handler(CommandHandler("confianca", set_confianca))
   app.add_handler(CommandHandler("status", status_comando))
+  app.add_handler(CommandHandler("resetar", resetar_config))
 
   print("🤖 Bot do Telegram rodando e escutando comandos...")
   await app.initialize()
   await app.start()
   await app.updater.start_polling()
 
-  # Mantém o bot rodando em background e executa varreduras periódicas se quiser
+  # Loop infinito para rodar as varreduras automáticas em background
   while True:
-    await asyncio.sleep(3600)  # Mantém o loop ativo
+    print(
+        "🐝 [Background] Executando varredura periódica para todos os"
+        " usuários..."
+    )
+    try:
+      await asyncio.to_thread(disparar_varreduras_gerais)
+    except Exception as e:
+      print(f"Erro na varredura periódica: {e}")
+
+    # Espera 3 horas (10800 segundos) até a próxima varredura automática
+    await asyncio.sleep(10800)
 
 
 if __name__ == "__main__":
