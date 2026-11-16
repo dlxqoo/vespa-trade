@@ -1,11 +1,9 @@
 from datetime import datetime
 import os
 import sqlite3
-from flask import Flask, jsonify, render_template, request
-import numpy as np
-import pandas as pd
-from sklearn.ensemble import RandomForestClassifier
-import yfinance as yf
+
+# Adicionado 'flash', 'redirect' e 'url_for' aqui embaixo:
+from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
 from flask_login import (
     FlaskLoginManager,
     UserMixin,
@@ -15,19 +13,26 @@ from flask_login import (
     logout_user,
 )
 from flask_sqlalchemy import SQLAlchemy
+import numpy as np
+import pandas as pd
+from sklearn.ensemble import RandomForestClassifier
 from werkzeug.security import check_password_hash, generate_password_hash
+import yfinance as yf
 
 app = Flask(__name__)
-# Configuração do Banco (PostgreSQL do Supabase ou SQLite local)
-app.config['SECRET_KEY'] = (
-    'chave-secreta-vespa-trade-2026'  # Pode manter ou alterar
-)
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get(
-    'DATABASE_URL', 'sqlite:///dados_robo.db'
-)
+app.config['SECRET_KEY'] = 'chave-secreta-vespa-trade-2026'
+
+# --- CORREÇÃO IMPORTANTE PARA O SUPABASE / POSTGRESQL ---
+db_url = os.environ.get('DATABASE_URL', 'sqlite:///dados_robo.db')
+if db_url and db_url.startswith('postgres://'):
+  db_url = db_url.replace('postgres://', 'postgresql://', 1)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = db_url
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 db = SQLAlchemy(app)
+
+# --- ADICIONE ESTAS LINHAS AQUI ---
 login_manager = FlaskLoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
