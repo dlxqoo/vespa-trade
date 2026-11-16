@@ -5,7 +5,7 @@ import sqlite3
 # Adicionado 'flash', 'redirect' e 'url_for' aqui embaixo:
 from flask import Flask, flash, jsonify, redirect, render_template, request, url_for
 from flask_login import (
-    FlaskLoginManager,
+    LoginManager,
     UserMixin,
     current_user,
     login_required,
@@ -33,7 +33,7 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 db = SQLAlchemy(app)
 
 # --- ADICIONE ESTAS LINHAS AQUI ---
-login_manager = FlaskLoginManager()
+login_manager = LoginManager()
 login_manager.init_app(app)
 login_manager.login_view = 'login'
 
